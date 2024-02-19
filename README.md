@@ -1,7 +1,11 @@
-We made this README file to provide a temporary guide for re-running the code before uploading it to GitHub. 
+### Smooth_And_Clear
 
+We made this README file to provide a temporary guide for re-running the code. 
+
+##### Dataset
 First, you should locate the datasets used in this study in the './data' path. We created folder names for each dataset and when you want to run model, you should place the data in that path to use when training the model. (All files containing filenames except for image data are located in that path, i.e., the testfile names file containing Foggy_Zurich's label set, 'gt_labelTrainIds_testv1_filenames.txt')
 
+##### Pretrained models
 We uploaded the pretrained weights for the model to the Google Drive link provided. The Google Drive contains the pretrained model and the final weights of our model.
 
 Google Drive Link
@@ -15,6 +19,7 @@ After download, it should be positioned on './Cityscapes_pretrained_model.pth'
 
 Also, you could download the model weights for each stage of the model. 
 
+##### Training
 For running,
 (1) First, you could run "clean_target_extraction.ipynb" to distinguish between clean and fog targets. The results of the distinction are already organized in './data/Foggy_Zurich/Foggy_Zurich/lists_file_names'. 
 
