@@ -1,0 +1,559 @@
+import os
+import os.path as osp
+
+import torch
+import torch.nn as nn
+from torch.utils import data
+from torch.autograd import Variable
+import torch.optim as optim
+import torch.backends.cudnn as cudnn
+import torch.nn.functional as F
+from torch.autograd import grad 
+
+import numpy as np
+import random
+
+from tqdm import tqdm
+from PIL import Image
+from packaging import version
+from datetime import datetime
+
+from model.refinenetlw import rf_lw101
+from model.discriminator import FCDiscriminator
+from model.discriminator import OutspaceDiscriminator
+from utils.losses import CrossEntropy2d
+from dataset.paired_cityscapes_CS_FS import Pairedcityscapes
+from dataset.Foggy_Zurich_train import foggyzurichDataSet
+from utils.optimisers import get_optimisers, get_lr_schedulers
+
+from pytorch_metric_learning import losses
+from pytorch_metric_learning.distances import CosineSimilarity
+from pytorch_metric_learning.reducers import MeanReducer
+from sklearn.metrics import pairwise_distances
+import inspect
+from torch.nn.parallel import DataParallel
+from tqdm.notebook import tqdm
+
+### Recording
+import time 
+
+def log(message, timestr): 
+    with open('./log/'+ str(timestr) +'_log.txt', 'a+') as logger:
+        logger.write(f'{message}\n')
+
+timestr = time.strftime("%m%d-%H%M")
+
+### Define cross entropy loss for segmentation
+def loss_calc(pred, label, gpu):
+    label = Variable(label.long()).cuda(gpu)
+    criterion = CrossEntropy2d().cuda(gpu)
+    return criterion(pred, label)
+
+### Optimizer for encoder and decoder (segmentation models)
+def setup_optimisers_and_schedulers(model):
+    optimisers = get_optimisers(
+        model=model,
+        enc_optim_type="sgd",
+        enc_lr=6e-4,
+        #enc_lr=1e-3,
+        enc_weight_decay=1e-5,
+        enc_momentum=0.9,
+        dec_optim_type="sgd",
+        dec_lr=6e-3,
+        dec_weight_decay=1e-5,
+        dec_momentum=0.9,
+    )
+    schedulers = get_lr_schedulers(
+        enc_optim=optimisers[0],
+        dec_optim=optimisers[1],
+        enc_lr_gamma=0.5,
+        dec_lr_gamma=0.5,
+        enc_scheduler_type="multistep",
+        dec_scheduler_type="multistep",
+        epochs_per_stage=(100, 100, 100),
+    )
+    return optimisers, schedulers
+
+
+def make_list(x):
+    """Returns the given input as a list."""
+    if isinstance(x, list):
+        return x
+    elif isinstance(x, tuple):
+        return list(x)
+    else:
+        return [x]
+
+def colorize_mask(mask):
+    new_mask = Image.fromarray(mask.astype(np.uint8)).convert('P')
+    palette = [128, 64, 128, 244, 35, 232, 70, 70, 70, 102, 102, 156, 190, 153, 153, 153, 153, 153, 250, 170, 30,
+            220, 220, 0, 107, 142, 35, 152, 251, 152, 70, 130, 180, 220, 20, 60, 255, 0, 0, 0, 0, 142, 0, 0, 70,
+            0, 60, 100, 0, 80, 100, 0, 0, 230, 119, 11, 32]
+    new_mask.putpalette(palette)
+    return new_mask
+
+### Evaluation function
+def evaluate(model, log, timestr) : 
+    import os
+    import os.path as osp
+
+    import torch
+    import torch.nn as nn
+    from torch.autograd import Variable
+    import torch.nn.functional as F
+    from torch.utils import data
+
+    import argparse
+    import numpy as np
+    from packaging import version
+    #import wandb
+    from PIL import Image
+    import matplotlib.pyplot as plt
+    import warnings
+    warnings.filterwarnings("ignore")
+
+    from model.refinenetlw import rf_lw101
+    from compute_iou import compute_mIoU
+    from dataset.cityscapes_dataset import cityscapesDataSet
+    from dataset.Foggy_Zurich_test import foggyzurichDataSet
+    from dataset.foggy_driving import foggydrivingDataSet
+    from dataset.paired_cityscapes import Pairedcityscapes
+
+    IMG_MEAN = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
+
+    palette = [128, 64, 128, 244, 35, 232, 70, 70, 70, 102, 102, 156, 190, 153, 153, 153, 153, 153, 250, 170, 30,
+               220, 220, 0, 107, 142, 35, 152, 251, 152, 70, 130, 180, 220, 20, 60, 255, 0, 0, 0, 0, 142, 0, 0, 70,
+               0, 60, 100, 0, 80, 100, 0, 0, 230, 119, 11, 32]
+    zero_pad = 256 * 3 - len(palette)
+    for i in range(zero_pad):
+        palette.append(0)
+
+    save_dir_fz = osp.join(f'./result_FZ', 'FIFO_model_Origin')
+    save_dir_fd = osp.join(f'./result_FD', 'FIFO_model_Origin')
+    save_dir_fdd = osp.join(f'./result_FDD', 'FIFO_model_Origin')
+    save_dir_clindau = osp.join(f'./result_Clindau', 'FIFO_model_Origin')
+    save_dir_foggy = osp.join(f'./result_foggycity', 'FIFO_model_Origin')  
+
+    if not os.path.exists(save_dir_fz):
+        os.makedirs(save_dir_fz)
+    if not os.path.exists(save_dir_fd):
+        os.makedirs(save_dir_fd)
+    if not os.path.exists(save_dir_fdd):
+        os.makedirs(save_dir_fdd)
+    if not os.path.exists(save_dir_clindau):
+        os.makedirs(save_dir_clindau)
+    if not os.path.exists(save_dir_foggy):
+        os.makedirs(save_dir_foggy)
+    
+    model.eval()
+    device = torch.device('cuda:0')
+    model.to(device)
+
+
+    testloader1 = data.DataLoader(foggyzurichDataSet("./data/Foggy_Zurich", "./data/Foggy_Zurich/Foggy_Zurich/lists_file_names/RGB_testv2_filenames.txt", crop_size=(1152, 648), mean=IMG_MEAN),
+                                    batch_size=1, shuffle=False, pin_memory=True)
+    testloader2 = data.DataLoader(foggyzurichDataSet("./data/Foggy_Zurich", "./data/Foggy_Zurich/Foggy_Zurich/lists_file_names/RGB_testv2_filenames.txt", crop_size=(1536, 864), mean=IMG_MEAN),
+                                    batch_size=1, shuffle=False, pin_memory=True)
+    testloader3 = data.DataLoader(foggyzurichDataSet("./data/Foggy_Zurich", "./data/Foggy_Zurich/Foggy_Zurich/lists_file_names/RGB_testv2_filenames.txt", crop_size=(1920, 1080), mean=IMG_MEAN),
+                                    batch_size=1, shuffle=False, pin_memory=True)
+
+    if version.parse(torch.__version__) >= version.parse('0.4.0'):
+        interp_eval = nn.Upsample(size=(1080,1920), mode='bilinear', align_corners=True)
+    else:
+        interp_eval = nn.Upsample(size=(1080,1920), mode='bilinear')
+
+    testloader_iter2 = enumerate(testloader2)
+    testloader_iter3 = enumerate(testloader3)
+
+
+    for index, batch1 in enumerate(testloader1):
+        image, label_test, _, name = batch1
+        with torch.no_grad():
+            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(0))
+            output_1 = interp_eval(output2)
+
+        _, batch2 = testloader_iter2.__next__()
+        image, label_test, _, name = batch2
+        with torch.no_grad():
+            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(0))
+            output_2 = interp_eval(output2)
+
+        _, batch3 = testloader_iter3.__next__()    
+        image, label_test, _, name = batch3
+        with torch.no_grad():
+            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(0))
+            output_3 = interp_eval(output2)
+
+        output = torch.cat([output_1,output_2,output_3])
+        output = torch.mean(output, dim=0)
+        output = output.cpu().numpy()
+        output = output.transpose(1,2,0)
+        output = np.asarray(np.argmax(output, axis=2), dtype=np.uint8)
+
+        output_col = colorize_mask(output)
+        output = Image.fromarray(output)
+
+        name = name[0].split('/')[-1]
+        output.save('%s/%s' % (save_dir_fz, name))
+        output_col.save('%s/%s_color.png' % (save_dir_fz, name[:-4]))
+    miou_fz = compute_mIoU("./data/Foggy_Zurich/Foggy_Zurich", save_dir_fz, "./data/Foggy_Zurich/Foggy_Zurich/lists_file_names", 'FZ')
+    log(f"Foggy Zurich MIOU {miou_fz}", timestr)
+
+
+    testloader1 = data.DataLoader(foggydrivingDataSet("./data/Foggy_Driving/Foggy_Driving", './lists_file_names/leftImg8bit_testdense_filenames.txt' , scale=1),
+                                    batch_size=1, shuffle=False, pin_memory=True)
+
+    testloader2 = data.DataLoader(foggydrivingDataSet("./data/Foggy_Driving/Foggy_Driving", './lists_file_names/leftImg8bit_testdense_filenames.txt' , scale=0.8),
+                                    batch_size=1, shuffle=False, pin_memory=True) 
+
+    testloader3 = data.DataLoader(foggydrivingDataSet("./data/Foggy_Driving/Foggy_Driving", './lists_file_names/leftImg8bit_testdense_filenames.txt' , scale=0.6),
+                                    batch_size=1, shuffle=False, pin_memory=True)
+    testloader_iter2 = enumerate(testloader2)
+    testloader_iter3 = enumerate(testloader3)
+
+    for index, batch in enumerate(testloader1):
+        image, size, name = batch
+        with torch.no_grad():
+            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(0))
+            interp_eval = nn.Upsample(size=(size[0][0],size[0][1]), mode='bilinear')
+            output_1 = interp_eval(output2)
+
+        _, batch2 = testloader_iter2.__next__()
+        image, _, name = batch2
+        with torch.no_grad():
+            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(0))
+            output_2 = interp_eval(output2)
+
+        _, batch3 = testloader_iter3.__next__()    
+        image, _, name = batch3
+        with torch.no_grad():
+            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(0))
+            output_3 = interp_eval(output2)
+
+        output = torch.cat([output_1,output_2,output_3])
+        output = torch.mean(output, dim=0)
+        output = output.cpu().numpy()
+        output = output.transpose(1,2,0)
+        output = np.asarray(np.argmax(output, axis=2), dtype=np.uint8)
+
+        output_col = colorize_mask(output)
+        output = Image.fromarray(output)
+
+        name = name[0].split('/')[-1]
+        output.save('%s/%s' % (save_dir_fdd, name))
+        output_col.save('%s/%s_color.png' % (save_dir_fdd, name[:-4]))
+    miou_fdd = compute_mIoU("./data/Foggy_Driving/Foggy_Driving", save_dir_fdd, './lists_file_names', 'FDD')
+    log(f"Foggy Driving Dense MIOU {miou_fdd}", timestr)
+
+    testloader1 = data.DataLoader(foggydrivingDataSet("./data/Foggy_Driving/Foggy_Driving", './lists_file_names/leftImg8bit_testall_filenames.txt', scale=1),
+                                    batch_size=1, shuffle=False, pin_memory=True) 
+
+    testloader2 = data.DataLoader(foggydrivingDataSet("./data/Foggy_Driving/Foggy_Driving", './lists_file_names/leftImg8bit_testall_filenames.txt', scale=0.8),
+                                    batch_size=1, shuffle=False, pin_memory=True) 
+
+    testloader3 = data.DataLoader(foggydrivingDataSet("./data/Foggy_Driving/Foggy_Driving", './lists_file_names/leftImg8bit_testall_filenames.txt', scale=0.6),
+                                    batch_size=1, shuffle=False, pin_memory=True) 
+    testloader_iter2 = enumerate(testloader2)
+    testloader_iter3 = enumerate(testloader3)
+
+    for index, batch in enumerate(testloader1):
+        image, size, name = batch
+        with torch.no_grad():
+            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(0))
+            interp_eval = nn.Upsample(size=(size[0][0],size[0][1]), mode='bilinear')
+
+            output_1 = interp_eval(output2)
+
+        _, batch2 = testloader_iter2.__next__()
+        image, _, name = batch2
+        with torch.no_grad():
+            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(0))
+            output_2 = interp_eval(output2)
+
+        _, batch3 = testloader_iter3.__next__()    
+        image, _, name = batch3
+        with torch.no_grad():
+            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(0))
+            output_3 = interp_eval(output2)
+
+        output = torch.cat([output_1,output_2,output_3])
+        output = torch.mean(output, dim=0)
+        output = output.cpu().numpy()
+        output = output.transpose(1,2,0)
+        output = np.asarray(np.argmax(output, axis=2), dtype=np.uint8)
+
+        output_col = colorize_mask(output)
+        output = Image.fromarray(output)
+
+        name = name[0].split('/')[-1]
+        output.save('%s/%s' % (save_dir_fd, name))
+        output_col.save('%s/%s_color.png' % (save_dir_fd, name[:-4]))
+    miou_fd = compute_mIoU("./data/Foggy_Driving/Foggy_Driving", save_dir_fd, './lists_file_names', 'FD')
+    log(f"Foggy Driving light MIOU {miou_fd}", timestr)
+
+    '''
+    testloader1 = data.DataLoader(cityscapesDataSet("./data/Cityscape", './dataset/cityscapes_list/val.txt', crop_size = (2048, 1024), mean=IMG_MEAN, scale=False, mirror=False, set='val'),
+                            batch_size=1, shuffle=False, pin_memory=True)
+    testloader2 = data.DataLoader(cityscapesDataSet("./data/Cityscape", './dataset/cityscapes_list/val.txt', crop_size = (2048*0.8, 1024*0.8), mean=IMG_MEAN, scale=False, mirror=False, set='val'),
+                            batch_size=1, shuffle=False, pin_memory=True)
+    testloader3 = data.DataLoader(cityscapesDataSet("./data/Cityscape", './dataset/cityscapes_list/val.txt', crop_size = (2048*0.6, 1024*0.6), mean=IMG_MEAN, scale=False, mirror=False, set='val'),
+                            batch_size=1, shuffle=False, pin_memory=True)   
+    testloader_iter2 = enumerate(testloader2)
+    testloader_iter3 = enumerate(testloader3)
+
+
+    for index, batch in enumerate(testloader1):
+        image, size, name = batch
+        with torch.no_grad():
+            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(0))
+            interp_eval = nn.Upsample(size=(1024, 2048), mode='bilinear')
+            output_1 = interp_eval(output2)
+
+        _, batch2 = testloader_iter2.__next__()
+        image, _, name = batch2
+        with torch.no_grad():
+            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(0))
+            output_2 = interp_eval(output2)
+
+        _, batch3 = testloader_iter3.__next__()    
+        image, _, name = batch3
+        with torch.no_grad():
+            output6, output3, output4, output5, output1, output2 = model(Variable(image).cuda(0))
+            output_3 = interp_eval(output2)
+
+        output = torch.cat([output_1,output_2,output_3])
+        output = torch.mean(output, dim=0)
+        output = output.cpu().numpy()
+        output = output.transpose(1,2,0)
+        output = np.asarray(np.argmax(output, axis=2), dtype=np.uint8)
+
+        output_col = colorize_mask(output)
+        output = Image.fromarray(output)
+
+        name = name[0].split('/')[-1]
+        output.save('%s/%s' % (save_dir_clindau, name))
+        output_col.save('%s/%s_color.png' % (save_dir_clindau, name.split('.')[0]))
+
+    miou_clindau = compute_mIoU("./data/Cityscape/gtFine", save_dir_clindau, './dataset/cityscapes_list', 'Clindau')
+    log(f"Cityscape Clean MIOU {miou_clindau}", timestr)
+    '''
+    return
+
+def lr_poly(base_lr, iter, max_iter, power):
+    return base_lr * ((1 - float(iter) / max_iter) ** (power))
+
+### For calculating entropy values from softmax probability
+def prob_2_entropy(prob):
+    """ convert probabilistic prediction maps to weighted self-information maps
+    """
+    n, c, h, w = prob.size()
+    return -torch.mul(prob, torch.log2(prob + 1e-30)) / np.log2(c)
+
+### Adjust learning rate for encoder
+def adjust_learning_rate(optimizer, i_iter):
+    lr = lr_poly(LEARNING_RATE, i_iter, NUM_STEPS, POWER)
+    optimizer.param_groups[0]['lr'] = lr
+    if len(optimizer.param_groups) > 1:
+        optimizer.param_groups[1]['lr'] = lr * 10
+
+### Adjust learning rate for discriminator
+def adjust_learning_rate_D(optimizer, i_iter):
+    lr = lr_poly(LEARNING_RATE_D, i_iter, NUM_STEPS, POWER)
+    optimizer.param_groups[0]['lr'] = lr
+    if len(optimizer.param_groups) > 1:
+        optimizer.param_groups[1]['lr'] = lr * 10
+
+def setup_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+
+
+RANDOM_SEED = 1234
+LEARNING_RATE = 2.5e-4
+LEARNING_RATE_D = 1e-4
+NUM_STEPS = 300000
+POWER = 0.9
+NUM_CLASSES = 19
+
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
+np.random.seed(RANDOM_SEED)
+torch.manual_seed(RANDOM_SEED)
+torch.cuda.manual_seed_all(RANDOM_SEED)
+torch.cuda.manual_seed(RANDOM_SEED)
+
+IMG_MEAN = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
+
+SAVE_PRED_EVERY = 100
+SNAPSHOT_DIR = "./weights/weights_stage1"
+NUM_STEPS_STOP = 80000 ## Warming up steps
+
+now = datetime.now().strftime('%m-%d-%H-%M')
+
+cudnn.enabled = True
+gpu = 0
+
+start_iter = 0
+### Segmentation model load (RefineNet-lw)
+model = rf_lw101(num_classes=NUM_CLASSES)
+
+### Load pretrained model to clean cityscapes
+re = torch.load("./Cityscapes_pretrained_model.pth")
+log(f"Success Load",timestr)
+model.load_state_dict(re['state_dict'])
+
+# init Discriminator
+num_class_list = [2048, 19] 
+model_D = nn.ModuleList([FCDiscriminator(num_classes=num_class_list[i]).train().cuda(0) if i<1 else OutspaceDiscriminator(num_classes=num_class_list[i]).train().cuda(0) for i in range(2)])
+
+optimizer_D = optim.Adam(model_D.parameters(), lr=1e-4, betas=(0.9, 0.99))
+optimizer_D.zero_grad()
+
+bce_loss = torch.nn.MSELoss() ## For discriminator
+cudnn.benchmark = True
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+cs_root = "./data/Cityscape"
+fs_root = "./data/Foggy_Cityscape"
+cs_list_path = './dataset/cityscapes_list/train_origin.txt'
+fs_list_path = f'./dataset/cityscapes_list/train_foggy_{0.005}.txt'
+max_iters = 100000 * 1 * 4
+
+## Clean Source and Fog Source dataloader
+CS_FS_pair_loader = data.DataLoader(Pairedcityscapes(fs_root, cs_root, fs_list_path, cs_list_path,
+                            max_iters=max_iters,
+                            mean=IMG_MEAN, set='train'), batch_size=2, shuffle=True, num_workers=0,
+                            pin_memory=True,drop_last=True)
+
+
+
+max_iters = 100000 * 1 * 2
+tgt_root = "./data/Foggy_Zurich"
+ct_list_path = "./data/Foggy_Zurich/Foggy_Zurich/lists_file_names/RGB_Clean_Target.txt"
+
+## Clean Target dataloader
+CT_loader = data.DataLoader(foggyzurichDataSet(tgt_root, ct_list_path,
+                                            max_iters=max_iters,
+                                            mean=IMG_MEAN, set=set),
+                                            batch_size=2, shuffle=True, num_workers=0,
+                                            pin_memory=True)
+
+
+model.train()
+model.to(device)
+
+optimisers, schedulers = setup_optimisers_and_schedulers( model=model)
+opts = make_list(optimisers)
+
+### For adversarial training
+source_label = 0
+target_label = 1
+
+### For intra-source (CS-FS) adaptation, by minimizing KL-Divergence
+kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
+m = nn.Softmax(dim=1)
+log_m = nn.LogSoftmax(dim=1)
+
+
+for i_iter in tqdm(range(NUM_STEPS)):
+
+    if i_iter == 0 : 
+        evaluate(model,log,timestr)
+
+    model.train()
+
+    for opt in opts:
+        opt.zero_grad()
+        adjust_learning_rate(opt, i_iter)
+
+    optimizer_D.zero_grad()
+    adjust_learning_rate_D(optimizer_D, i_iter)
+
+    for param in model_D.parameters():
+        param.requires_grad = False
+
+    batch = next(iter(CS_FS_pair_loader))
+    fs_image, cs_image,label, size, _, _, fs_arry, cs_arry = batch
+    interp = nn.Upsample(size=(size[0][0],size[0][1]), mode='bilinear')
+    fs_image = fs_image.to(device)
+    cs_image = cs_image.to(device)
+    label = label.long().to(device)
+        
+    images = Variable(fs_image).cuda()
+    feature_fs0,feature_fs1,feature_fs2, feature_fs3,feature_fs4,feature_fs5 = model(images)
+    pred_fs5 = interp(feature_fs5)
+    loss_seg = loss_calc(pred_fs5, label,0)
+    
+    images2 = Variable(cs_image).cuda()
+    feature_cs0,feature_cs1,feature_cs2, feature_cs3,feature_cs4,feature_cs5 = model(images2)
+    pred_cs5 = interp(feature_cs5)
+    loss_seg2 = loss_calc(pred_cs5, label,0)
+    
+    feature_cs5_logsoftmax = log_m(feature_cs5)
+    feature_fs5_softmax = m(feature_fs5)
+    feature_fs5_logsoftmax = log_m(feature_fs5)
+    feature_cs5_softmax = m(feature_cs5)
+
+    ### Consistency loss (Minimize KL-Divergence)
+    loss_con = kl_loss(feature_fs5_logsoftmax, feature_cs5_softmax)
+    
+    batch = next(iter(CT_loader))
+    img, size, name, img_arry = batch
+    img = img.to(device)
+
+    feature_ct0,feature_ct1,feature_ct2, feature_ct3,feature_ct4,feature_ct5 = model(img)
+    pred_ct5 = interp(feature_ct5)
+
+    ## Adversarial Training
+    loss_adv = 0
+    D_out = model_D[0](feature_ct4)
+    loss_adv += bce_loss(D_out, torch.FloatTensor(D_out.data.size()).fill_(source_label).to(device))
+    D_out = model_D[1](F.softmax(pred_ct5, dim=1))
+    loss_adv += bce_loss(D_out, torch.FloatTensor(D_out.data.size()).fill_(source_label).to(device))
+    loss_adv = loss_adv*0.01
+    
+    loss_seg_feat_adv = loss_seg+loss_seg2+loss_adv+0.0001*loss_con
+    loss_seg_feat_adv.backward()
+
+    for opt in opts:
+        opt.step()
+
+    for param in model_D.parameters():
+        param.requires_grad = True
+
+    loss_D_source = 0
+    D_out_source = model_D[0](feature_cs4.detach())
+    loss_D_source += bce_loss(D_out_source, torch.FloatTensor(D_out_source.data.size()).fill_(source_label).to(device))
+    D_out_source = model_D[1](F.softmax(pred_cs5.detach(),dim=1))
+    loss_D_source += bce_loss(D_out_source, torch.FloatTensor(D_out_source.data.size()).fill_(source_label).to(device))
+    loss_D_source.backward()
+
+    loss_D_target = 0
+    D_out_target = model_D[0](feature_ct4.detach())
+    loss_D_target += bce_loss(D_out_target, torch.FloatTensor(D_out_target.data.size()).fill_(target_label).to(device))
+    D_out_target = model_D[1](F.softmax(pred_ct5.detach(),dim=1))
+    loss_D_target += bce_loss(D_out_target, torch.FloatTensor(D_out_target.data.size()).fill_(target_label).to(device))
+    loss_D_target.backward()
+        
+    optimizer_D.step()
+    
+    if i_iter % 10 == 0:
+        print('iter = {0:8d}/{1:8d}, loss_seg = {2:.3f} loss_seg2 = {3:.3f} loss_adv = {4:.3f} loss_D_s = {5:.3f}, loss_D_t = {6:.3f} loss_con = {7:.3f}'.format(
+        i_iter, NUM_STEPS, loss_seg.item(), loss_seg2.item(), loss_adv.item(), loss_D_source.item(), loss_D_target.item(),loss_con.item()))
+        log(f"iter = {i_iter}/{NUM_STEPS},loss_seg = {loss_seg.item()},loss_seg2 = {loss_seg2.item()},loss_adv = {loss_adv.item()}, loss_D_s = {loss_D_source.item()}, loss_D_t = {loss_D_target.item()}, loss_con = {loss_con.item()}", timestr)
+
+    if i_iter >= NUM_STEPS_STOP - 1:
+        torch.save(model.state_dict(), osp.join(SNAPSHOT_DIR, 'Stage1_Final.pth'))
+        torch.save(model_D.state_dict(), osp.join(SNAPSHOT_DIR, 'Stage1_D_Final.pth'))
+        break
+
+    if i_iter % SAVE_PRED_EVERY == 0 and i_iter != 0:
+        print('taking snapshot ...')
+        evaluate(model,log,timestr)
+        torch.save(model.state_dict(), osp.join(SNAPSHOT_DIR, 'Stage1_' + str(i_iter) + '.pth'))
+        torch.save(model_D.state_dict(), osp.join(SNAPSHOT_DIR, 'Stage1_' + str(i_iter) + '_D.pth'))
+
