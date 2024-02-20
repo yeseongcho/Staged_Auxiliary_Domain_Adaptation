@@ -1,4 +1,4 @@
-### Smooth_And_Clear
+### Smooth_And_Clear: Auxiliary Domain and Inter-Class Contrast Adaptation for Semantic Foggy Scene Segmentation
 
 We made this README file to provide a temporary guide for re-running the code. 
 
