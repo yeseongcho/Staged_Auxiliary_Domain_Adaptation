@@ -1,6 +1,6 @@
 # Staged Auxiliary-Domain Adaptation with Inter-Class Contrast for Robust Foggy Scene Segmentation on Lightweight Architectures
 
-This repository provides the official implementation of **Smooth_And_Clear**, a staged unsupervised domain adaptation framework for robust semantic segmentation under foggy and adverse weather conditions. The method is designed for **lightweight segmentation models**, enabling stable deployment in real-world, resource-constrained environments. We use the base code from [FIFO](https://github.com/sohyun-l/fifo).
+This repository provides the official implementation, a staged unsupervised domain adaptation framework for robust semantic segmentation under foggy and adverse weather conditions. The method is designed for **lightweight segmentation models**, enabling stable deployment in real-world, resource-constrained environments. We use the base code from [FIFO](https://github.com/sohyun-l/fifo).
 
 ---
 
