@@ -25,5 +25,3 @@ For running,
 
 (2) Next, proceed with "stage1.py", "stage2.py", and "stage3.py" in sequence. After that, we build a pseudo-label via "pseudo_labeling.py" before proceeding to "stage4.py", and finally run "stage4.py". Pseudo-labels are stored in the paths './pseudo_label_clean, ./pseudo_label_foggy' respectively. 
 
-
-이건 github에 있는 markdown인데, 조금 더 fancy하게 바꾸고 싶어. README 페이지를
