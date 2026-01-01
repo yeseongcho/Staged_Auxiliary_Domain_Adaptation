@@ -1,7 +1,7 @@
 # Smooth_And_Clear
 **Auxiliary Domain and Inter-Class Contrast Adaptation for Semantic Foggy Scene Segmentation**
 
-This repository provides the official implementation of **Smooth_And_Clear**, a staged unsupervised domain adaptation framework for robust semantic segmentation under foggy and adverse weather conditions. The method is designed for **lightweight segmentation models**, enabling stable deployment in real-world, resource-constrained environments.
+This repository provides the official implementation of **Smooth_And_Clear**, a staged unsupervised domain adaptation framework for robust semantic segmentation under foggy and adverse weather conditions. The method is designed for **lightweight segmentation models**, enabling stable deployment in real-world, resource-constrained environments. We use the base code from [FIFO](https://github.com/sohyun-l/fifo).
 
 ---
 
@@ -155,25 +155,5 @@ python stage4.py
 - Batch size is set to **2** due to GPU memory constraints
 - ICCA is applied **only after sufficient warm-up** (Stage 3+)
 - The framework avoids catastrophic forgetting on clean data
-
----
-
-## 📜 License & Citation
-
-If you use this code, please cite our paper:
-
-> **Smooth and Clear: Auxiliary Domain and Inter-Class Contrast Adaptation for Semantic Foggy Scene Segmentation**  
-> *Knowledge-Based Systems, 2024*
-
----
-
-## 🙏 Acknowledgement
-
-This codebase builds upon:
-- RefineNet / RefineNet-lw
-- Cityscapes & Foggy Cityscapes
-- Prior work on UDA and contrastive adaptation
-
----
 
 For questions or issues, feel free to open an issue or contact the authors.
