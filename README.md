@@ -1,4 +1,4 @@
-# Staged Auxiliary-Domain Adaptation with Inter-Class Contrast for Robust Foggy Scene Segmentation on Lightweight Architectures
+# Staged Auxiliary-Domain Adaptation with Inter-Class Contrast for Robust Foggy Scene Segmentation
 
 This repository provides the official implementation, a staged unsupervised domain adaptation framework for robust semantic segmentation under foggy weather conditions. The method is designed for **lightweight segmentation models**, enabling stable deployment in real-world, resource-constrained environments. We use the base code from [FIFO](https://github.com/sohyun-l/fifo).
 
